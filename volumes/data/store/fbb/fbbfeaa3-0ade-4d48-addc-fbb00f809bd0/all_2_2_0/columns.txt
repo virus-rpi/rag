@@ -1,0 +1,5 @@
+columns format version: 1
+3 columns:
+`id` Int64
+`page_content` String
+`embeddings` Array(Float32)

@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "rag"
+version = "0.1.0"
+description = ""
+authors = ["noasanto <noa.santo@satellytes.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+google-generativeai = "^0.8.2"
+langchain-community = "^0.3.1"
+pandas = "^2.2.3"
+clickhouse-connect = "^0.8.0"
+pypdf = "^5.0.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

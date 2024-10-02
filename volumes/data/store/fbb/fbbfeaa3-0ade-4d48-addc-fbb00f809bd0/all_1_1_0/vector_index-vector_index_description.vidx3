@@ -1,0 +1,17 @@
+vector index metadata format version: 1
+num_segments: 1
+version: 1.0.0
+type: FLAT
+metric: L2
+dimension: 768
+total_vec: 5
+fallback_to_flat: 1
+current_part_name: all_1_1_0
+owner_part_name: all_1_1_0
+vector_index_name: vector_index
+column_name: embeddings
+owner_part_id: 0
+num_params: 0
+num_infos: 2
+`disk_usage_bytes` 0
+`memory_usage_bytes` 15360
