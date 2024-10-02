@@ -1,6 +1,7 @@
 import glob
 
 import numpy as np
+import requests
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
@@ -22,6 +23,15 @@ client = clickhouse_connect.get_client(
 model = genai.GenerativeModel('gemini-1.5-flash')
 chat_session = model.start_chat(history=[])
 
+text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=150,
+        length_function=len,
+        is_separator_regex=False,
+    )
+
+keywords = ["weather"]
+
 
 def get_embeddings(text: str) -> np.array:
     embedding = genai.embed_content(model='models/embedding-001',
@@ -34,12 +44,6 @@ def pdf_embeddings(path: str) -> np.array:
     pages = loader.load_and_split()
     text = "\n".join([doc.page_content for doc in pages])
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=150,
-        length_function=len,
-        is_separator_regex=False,
-    )
     docs = text_splitter.create_documents([text])
     for i, d in enumerate(docs):
         d.metadata = {"doc_id": i}
@@ -50,19 +54,21 @@ def txt_embeddings(path: str) -> np.array:
     with open(path, 'r', encoding='utf-8') as file:
         text = file.read()
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=150,
-        length_function=len,
-        is_separator_regex=False,
-    )
-
     docs = text_splitter.create_documents([text])
 
     for i, d in enumerate(docs):
         d.metadata = {"doc_id": i}
 
     return docs
+
+def keywords_embeddings(words: list[str]) -> np.array:
+    docs = text_splitter.create_documents(words)
+
+    for i, d in enumerate(docs):
+        d.metadata = {"doc_id": i}
+
+    return docs
+
 
 def load_files(batch_size: int) -> None:
     docs = []
@@ -81,11 +87,11 @@ def load_files(batch_size: int) -> None:
     })
 
     client.command("""
-        DROP TABLE IF EXISTS default.test
+        DROP TABLE IF EXISTS default.docs
     """)
 
     client.command("""
-        CREATE TABLE default.test (
+        CREATE TABLE default.docs (
             id Int64,
             page_content String,
             embeddings Array(Float32),
@@ -100,46 +106,119 @@ def load_files(batch_size: int) -> None:
         start_idx = i * batch_size
         end_idx = start_idx + batch_size
         batch_data = dataframe[start_idx:end_idx]
-        client.insert("default.test", batch_data.to_records(index=False).tolist(), column_names=batch_data.columns.tolist())
+        client.insert("default.docs", batch_data.to_records(index=False).tolist(), column_names=batch_data.columns.tolist())
         print(f"Batch {i+1}/{num_batches} inserted.")
 
     client.command("""
-    ALTER TABLE default.test
+    ALTER TABLE default.docs
         ADD VECTOR INDEX vector_index embeddings
         TYPE SCANN
     """)
 
-def get_relevant_docs(user_query):
+    embeddings = [get_embeddings(keyword) for keyword in keywords]
+    keywords_df = pd.DataFrame({
+        "keywords": keywords,
+        "embeddings": embeddings
+    })
+
+    client.command("""
+            DROP TABLE IF EXISTS default.keywords
+        """)
+
+    client.command("""
+        CREATE TABLE default.keywords (
+            id Int64,
+            keywords String,
+            embeddings Array(Float32),
+            CONSTRAINT check_data_length CHECK length(embeddings) = 768
+        ) ENGINE = MergeTree()
+        ORDER BY id
+    """)
+
+    client.insert("default.keywords", keywords_df.to_records(index=False).tolist(), column_names=keywords_df.columns.tolist())
+    print("Keywords added.")
+
+    client.command("""
+    ALTER TABLE default.keywords
+        ADD VECTOR INDEX vector_index embeddings
+        TYPE SCANN
+    """)
+
+
+def get_weather_data(prompt: str) -> str:
+    url_meta_prompt = f"""
+    Answer only with a valid request url for an api.open-meteo.com api endpoint. 
+    The url should fetch all necessary data to answer the following prompt: "{prompt}"
+    Use the parameter "&timezone=auto" to avoid time zone errors. The position should be given to the api as &longitude=... and &latitude=... .
+    ONLY CREATE A VALID Open-Meteo API URL! ANSWER ONLY WITH THE URL!
+    """
+    temp_session = model.start_chat(history=chat_session.history)
+    answer = temp_session.send_message(url_meta_prompt).text.strip().lower().replace("\n", "").replace("```", "")
+    return str(requests.get(answer).json())
+
+def get_relevant_docs(user_query, threshold=0.5):
     query_embeddings = get_embeddings(user_query)
     results = client.query(f"""
         SELECT page_content,
-        distance(embeddings, {query_embeddings}) as dist FROM default.test ORDER BY dist LIMIT 3
+        distance(embeddings, {query_embeddings}) as dist 
+        FROM default.docs 
+        ORDER BY dist 
+        LIMIT 3
     """)
-    relevant_docs = []
-    for row in results.named_results():
-        relevant_docs.append(row['page_content'])
+    relevant_docs = [
+        row['page_content'] for row in results.named_results()
+        if row['dist'] < threshold
+    ]
     return relevant_docs
 
-def make_rag_prompt(query, relevant_passage):
+def get_relevant_keywords(user_query, threshold=0.5):
+    query_embeddings = get_embeddings(user_query)
+    results = client.query(f"""
+        SELECT keywords,
+        distance(embeddings, {query_embeddings}) as dist 
+        FROM default.keywords  
+        ORDER BY dist 
+        LIMIT 3
+    """)
+    relevant_keywords = [
+        row['keywords'] for row in results.named_results()
+        if row['dist'] < threshold
+    ]
+    return relevant_keywords
+
+def get_relevant_api_data(user_query) -> str:
+    relevant_keywords = get_relevant_keywords(user_query)
+    data = ""
+    if "weather" in relevant_keywords:
+        data += get_weather_data(user_query)
+    return data
+
+def make_rag_prompt(query, relevant_passage, relevant_data):
     relevant_passage = ' '.join(relevant_passage)
     prompt = (
         f"QUESTION: '{query}'\n"
-        f"PASSAGE: '{relevant_passage}'\n\n"
+        f"PASSAGE: '{relevant_passage}'\n"
+        f"DATA: '{relevant_data}'\n"
+        '\n'
     )
     return prompt
 
 def generate_answer(query):
+    if not query or query == "":
+        return
     relevant_text = get_relevant_docs(query)
+    relevant_api_data = get_relevant_api_data(query)
     text = " ".join(relevant_text)
-    prompt = make_rag_prompt(query, relevant_passage=text)
+    prompt = make_rag_prompt(query, relevant_passage=text, relevant_data=relevant_api_data)
     return chat_session.send_message(prompt).text
 
 if __name__ == "__main__":
     if input("Reindex information? (y/n): ") == "y": load_files(5)
     initial_prompt = """
-    You are a helpful and informative chatbot that answers questions using text from the reference passage included below the question.
+    You are a helpful and informative chatbot that answers questions using information from the passage and/or data included below the question.
     Respond in a complete sentence and make sure that your response is easy to understand for everyone.
-    Maintain a friendly and conversational tone. If the passage is irrelevant, feel free to ignore it.\n\n
+    Maintain a friendly and conversational tone. If the passage is really irrelevant, feel free to ignore it.
+    Do not talk about the provided passage or data and only use it to answer the question!\n\n
     """
     print(generate_answer(initial_prompt + input("> ")))
     while True:
