@@ -156,7 +156,7 @@ def get_weather_data(prompt: str) -> str:
     answer = temp_session.send_message(url_meta_prompt).text.strip().lower().replace("\n", "").replace("```", "")
     return str(requests.get(answer).json())
 
-def get_relevant_docs(user_query, threshold=0.5):
+def get_relevant_docs(user_query):
     query_embeddings = get_embeddings(user_query)
     results = client.query(f"""
         SELECT page_content,
@@ -165,13 +165,9 @@ def get_relevant_docs(user_query, threshold=0.5):
         ORDER BY dist 
         LIMIT 3
     """)
-    relevant_docs = [
-        row['page_content'] for row in results.named_results()
-        if row['dist'] < threshold
-    ]
-    return relevant_docs
+    return [row['page_content'] for row in results.named_results()]
 
-def get_relevant_keywords(user_query, threshold=0.5):
+def get_relevant_keywords(user_query, threshold=0.9):
     query_embeddings = get_embeddings(user_query)
     results = client.query(f"""
         SELECT keywords,
