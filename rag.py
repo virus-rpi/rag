@@ -1,5 +1,4 @@
 import glob
-
 import numpy as np
 import requests
 from langchain_community.document_loaders import PyPDFLoader
@@ -9,6 +8,9 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import pandas as pd
 import clickhouse_connect
+from transformers import AutoModel
+
+print("Initializing models...")
 
 load_dotenv()
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
@@ -30,14 +32,16 @@ text_splitter = RecursiveCharacterTextSplitter(
         is_separator_regex=False,
     )
 
+embedding_model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
+
 keywords = ["weather"]
 
 
-def get_embeddings(text: str) -> np.array:
-    embedding = genai.embed_content(model='models/embedding-001',
-                                    content=text,
-                                    task_type="retrieval_document")
-    return embedding['embedding']
+def get_passage_embedding(text: str) -> np.array:
+    return embedding_model.encode(text, task='retrieval.passage').tolist()
+
+def get_query_embedding(text: str) -> np.array:
+    return embedding_model.encode(text, task='retrieval.query').tolist()
 
 def pdf_embeddings(path: str) -> np.array:
     loader = PyPDFLoader(path)
@@ -71,6 +75,7 @@ def keywords_embeddings(words: list[str]) -> np.array:
 
 
 def load_files(batch_size: int) -> None:
+    print("Loading files...")
     docs = []
 
     for path in glob.glob("./files/*.pdf"):
@@ -78,14 +83,16 @@ def load_files(batch_size: int) -> None:
     for path in glob.glob("./files/*.txt"):
         docs.extend(txt_embeddings(path))
 
+    print("Generating embeddings...")
     content_list = [doc.page_content for doc in docs]
-    embeddings = [get_embeddings(content) for content in content_list]
+    embeddings = [get_passage_embedding(content) for content in content_list]
 
     dataframe = pd.DataFrame({
         'page_content': content_list,
         'embeddings': embeddings
     })
 
+    print("Preparing DB...")
     client.command("""
         DROP TABLE IF EXISTS default.docs
     """)
@@ -95,7 +102,7 @@ def load_files(batch_size: int) -> None:
             id Int64,
             page_content String,
             embeddings Array(Float32),
-            CONSTRAINT check_data_length CHECK length(embeddings) = 768
+            CONSTRAINT check_data_length CHECK length(embeddings) = 1024
         ) ENGINE = MergeTree()
         ORDER BY id
     """)
@@ -115,7 +122,7 @@ def load_files(batch_size: int) -> None:
         TYPE SCANN
     """)
 
-    embeddings = [get_embeddings(keyword) for keyword in keywords]
+    embeddings = [get_passage_embedding(keyword) for keyword in keywords]
     keywords_df = pd.DataFrame({
         "keywords": keywords,
         "embeddings": embeddings
@@ -130,7 +137,7 @@ def load_files(batch_size: int) -> None:
             id Int64,
             keywords String,
             embeddings Array(Float32),
-            CONSTRAINT check_data_length CHECK length(embeddings) = 768
+            CONSTRAINT check_data_length CHECK length(embeddings) = 1024
         ) ENGINE = MergeTree()
         ORDER BY id
     """)
@@ -156,8 +163,7 @@ def get_weather_data(prompt: str) -> str:
     answer = temp_session.send_message(url_meta_prompt).text.strip().lower().replace("\n", "").replace("```", "")
     return str(requests.get(answer).json())
 
-def get_relevant_docs(user_query):
-    query_embeddings = get_embeddings(user_query)
+def get_relevant_docs(query_embeddings):
     results = client.query(f"""
         SELECT page_content,
         distance(embeddings, {query_embeddings}) as dist 
@@ -167,8 +173,7 @@ def get_relevant_docs(user_query):
     """)
     return [row['page_content'] for row in results.named_results()]
 
-def get_relevant_keywords(user_query, threshold=0.9):
-    query_embeddings = get_embeddings(user_query)
+def get_relevant_keywords(query_embeddings, threshold=1.6):
     results = client.query(f"""
         SELECT keywords,
         distance(embeddings, {query_embeddings}) as dist 
@@ -182,8 +187,8 @@ def get_relevant_keywords(user_query, threshold=0.9):
     ]
     return relevant_keywords
 
-def get_relevant_api_data(user_query) -> str:
-    relevant_keywords = get_relevant_keywords(user_query)
+def get_relevant_api_data(user_query, query_embeddings) -> str:
+    relevant_keywords = get_relevant_keywords(query_embeddings)
     data = ""
     if "weather" in relevant_keywords:
         data += get_weather_data(user_query)
@@ -202,8 +207,9 @@ def make_rag_prompt(query, relevant_passage, relevant_data):
 def generate_answer(query):
     if not query or query == "":
         return
-    relevant_text = get_relevant_docs(query)
-    relevant_api_data = get_relevant_api_data(query)
+    query_embeddings = get_query_embedding(query)
+    relevant_text = get_relevant_docs(query_embeddings)
+    relevant_api_data = get_relevant_api_data(query, query_embeddings)
     text = " ".join(relevant_text)
     prompt = make_rag_prompt(query, relevant_passage=text, relevant_data=relevant_api_data)
     return chat_session.send_message(prompt).text

@@ -19,6 +19,7 @@ or with poetry:
 ```bash
 poetry install
 ```
+To install torch follow [this](https://pytorch.org/get-started/locally/). This is necessary because torch can't be easily installed with poetry. 
 
 ### 2. Create .env
 Create a new file with the name `.env` and write
@@ -74,5 +75,11 @@ When running it for the first time the information has to be but in the vector d
 > 
 > Answer: Satellytes is a technology company that focuses on creating high-quality software solutions.
 
-## Development process:
+## Development process
 // TODO
+
+## Possible improvements
+
+- Use mean pooling on prompts that require the weather api to generate the embedding instead of using a embedded keyword
+- Better LLM / SLM model
+- Improve meta prompts

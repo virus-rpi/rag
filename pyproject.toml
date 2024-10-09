@@ -7,16 +7,17 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.12.7"
-google-generativeai = "^0.8.2"
-langchain-community = "^0.3.1"
+google-generativeai = "^0.8.3"
+langchain-community = "^0.3.2"
 pandas = "^2.2.3"
-clickhouse-connect = "^0.8.0"
+clickhouse-connect = "^0.8.3"
 pypdf = "^5.0.0"
 numpy = "^1.26.4"
 requests = "^2.32.3"
 longchain = "^0.4.2"
 python-dotenv = "^1.0.1"
-
+transformers = "^4.45.2"
+einops = "^0.8.0"
 
 [build-system]
 requires = ["poetry-core"]
