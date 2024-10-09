@@ -3,17 +3,11 @@ import numpy as np
 import requests
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-import os
-from dotenv import load_dotenv
-import google.generativeai as genai
 import pandas as pd
 import clickhouse_connect
-from transformers import AutoModel
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 print("Initializing models...")
-
-load_dotenv()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 
 client = clickhouse_connect.get_client(
     host='localhost',
@@ -22,8 +16,11 @@ client = clickhouse_connect.get_client(
     password='12345'
 )
 
-model = genai.GenerativeModel('gemini-1.5-flash')
-chat_session = model.start_chat(history=[])
+checkpoint = "HuggingFaceTB/SmolLM-135M-Instruct"
+device = "cpu"
+tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
+history = []
 
 text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
@@ -157,10 +154,12 @@ def get_weather_data(prompt: str) -> str:
     Answer only with a valid request url for an api.open-meteo.com api endpoint. 
     The url should fetch all necessary data to answer the following prompt: "{prompt}"
     Use the parameter "&timezone=auto" to avoid time zone errors. The position should be given to the api as &longitude=... and &latitude=... .
-    ONLY CREATE A VALID Open-Meteo API URL! ANSWER ONLY WITH THE URL!
+    ONLY CREATE A VALID Open-Meteo API URL! ANSWER ONLY WITH THE URL! 
+    ANSWER: \n
     """
-    temp_session = model.start_chat(history=chat_session.history)
-    answer = temp_session.send_message(url_meta_prompt).text.strip().lower().replace("\n", "").replace("```", "")
+    tokenized_url_meta_prompt = tokenizer.encode(url_meta_prompt, return_tensors='pt').to(device)
+    tokenized_answer = model.generate(tokenized_url_meta_prompt, return_tensors='pt').to(device)
+    answer =  tokenizer.decode(tokenized_answer[0]).strip().lower().replace("\n", "").replace("```", "")
     return str(requests.get(answer).json())
 
 def get_relevant_docs(query_embeddings):
@@ -200,19 +199,24 @@ def make_rag_prompt(query, relevant_passage, relevant_data):
         f"QUESTION: '{query}'\n"
         f"PASSAGE: '{relevant_passage}'\n"
         f"DATA: '{relevant_data}'\n"
-        '\n'
+        'ANSWER: '
     )
     return prompt
 
 def generate_answer(query):
+    global history
     if not query or query == "":
-        return
+        return "Please enter a query."
     query_embeddings = get_query_embedding(query)
     relevant_text = get_relevant_docs(query_embeddings)
     relevant_api_data = get_relevant_api_data(query, query_embeddings)
     text = " ".join(relevant_text)
     prompt = make_rag_prompt(query, relevant_passage=text, relevant_data=relevant_api_data)
-    return chat_session.send_message(prompt).text
+    history.append({"role": "user", "content": prompt})
+    input_text=tokenizer.apply_chat_template(history, tokenize=False)
+    inputs = tokenizer.encode(input_text, return_tensors='pt').to(device)
+    outputs = model.generate(inputs, max_new_tokens=100, temperature=0.5, top_p=0.9, do_sample=True)
+    return tokenizer.decode(outputs[0])
 
 if __name__ == "__main__":
     if input("Reindex information? (y/n): ") == "y": load_files(5)

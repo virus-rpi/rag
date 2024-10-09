@@ -51,7 +51,7 @@ When running it for the first time the information has to be but in the vector d
 > 
 > Answer: Satellytes is a technology company that is always looking for passionate developers. 
 
-> What options for a carer does Satellyets provide?
+> What options for a career does Satellyets provide?
 > 
 > Answer: Satellyets is looking for passionate developers who want to take on new challenges and continually develop themselves. 
 
