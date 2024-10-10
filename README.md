@@ -31,7 +31,7 @@ GEMINI_API_KEY=<your-api-key>
 ```
 in it.
 
-If you skip this step you will not be able to use the weather api because the local LLMs that can run on normal laptops are not able to generate the request URL for the weather api.
+If you skip this step you will not be able to use the weather api because the local LLM can't generate a valid request URL consistently.
 
 ### 3. Set up the vector database
 Just run
@@ -50,7 +50,7 @@ python rag.py
 When running it for the first time the information has to be but in the vector db so answer `y` when asked if the information should be indexed.
 
 ## Example prompts
-
+These prompts were answered by Gemini instead of the currently used local model.
 
 > What is the company Satellytes?
 > 

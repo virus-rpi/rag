@@ -18,6 +18,16 @@ try:
 except KeyError:
     print("No Gemini API key found in environment variables. Please set it to use the weather API.")
 
+model_name = "HuggingFaceTB/smollm-360M-instruct-add-basics"
+pipe = pipeline("text-generation", model=model_name, tokenizer=model_name)
+print(f"Model {model_name} loaded.")
+
+embedding_model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
+print("Embedding model loaded.")
+
+keywords = ["weather"]
+
+print("Connecting to Vektor DB...")
 client = clickhouse_connect.get_client(
     host='localhost',
     port=8123,
@@ -25,7 +35,6 @@ client = clickhouse_connect.get_client(
     password='12345'
 )
 
-pipe = pipeline("question-answering", model="deepset/roberta-base-squad2", tokenizer="deepset/roberta-base-squad2")
 
 text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
@@ -33,10 +42,6 @@ text_splitter = RecursiveCharacterTextSplitter(
         length_function=len,
         is_separator_regex=False,
     )
-
-embedding_model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
-
-keywords = ["weather"]
 
 
 def get_passage_embedding(text: str) -> np.array:
@@ -154,13 +159,13 @@ def load_files(batch_size: int) -> None:
     """)
 
 
-def get_weather_data(prompt: str, history: list[str]) -> str:
+def get_weather_data(prompt: str, history: list[dict[str, str]]) -> str:
     try:
         os.environ['GEMINI_API_KEY']
     except KeyError:
         return "The weather API is not available at the moment."
     url_meta_prompt = f"""
-    {' '.join(history)}
+    {str(history)}
     
     Answer only with a valid request url for an api.open-meteo.com api endpoint. 
     The url should fetch all necessary data to answer the following prompt: "{prompt}"
@@ -218,17 +223,21 @@ def generate_prompt(query, history):
     context = make_context(relevant_passage=text, relevant_data=relevant_api_data)
     return query, context
 
+def llm(history):
+    return pipe(history, max_new_tokens=50, truncation=True)[0]['generated_text'][-1]['content']
+
 def main_loop():
     initial_prompt = """
         You are a helpful and informative chatbot that answers questions using information from the passage and/or data included below the question.
         Respond in a complete sentence and make sure that your response is easy to understand for everyone.
         Maintain a friendly and conversational tone. If the passage is really irrelevant, feel free to ignore it.
-        Do not talk about the provided passage or data and only use it to answer the question!\n\n
+        Do not talk about the provided passage or data and only use it to answer the question!
+        Answer as concise as possible and do not include any unnecessary information!
         """
     first_prompt = input("> ")
-    history = [initial_prompt+first_prompt]
     prompt, context = generate_prompt(first_prompt, [])
-    yield {'question': prompt, "context": initial_prompt+context}
+    history = [{'role': 'system', 'content': initial_prompt},{'role': 'user', 'content': prompt}]
+    yield llm(history)
     while True:
         user_input = input("> ")
         if not user_input or user_input == "":
@@ -237,10 +246,11 @@ def main_loop():
         if user_input == "exit":
             break
         prompt, context = generate_prompt(user_input, history)
-        yield {'question': prompt, "context": "\n".join(history) + context}
-        history.append(context+"\n"+prompt)
+        history.append({'role': 'system', 'content': context})
+        history.append({'role': 'user', 'content': prompt})
+        yield llm(history)
 
 if __name__ == "__main__":
     if input("Reindex information? (y/n): ") == "y": load_files(5)
-    for out in pipe(main_loop()):
-        print(out['answer'])
+    for out in main_loop():
+        print(out)
