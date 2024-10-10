@@ -7,14 +7,16 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import pandas as pd
 import clickhouse_connect
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoModel, pipeline
 import google.generativeai as genai
 
 print("Initializing models...")
 
 load_dotenv()
-if os.environ['GEMINI_API_KEY']:
+try:
     genai.configure(api_key=os.environ['GEMINI_API_KEY'])
+except KeyError:
+    print("No Gemini API key found in environment variables. Please set it to use the weather API.")
 
 client = clickhouse_connect.get_client(
     host='localhost',
@@ -22,11 +24,6 @@ client = clickhouse_connect.get_client(
     username='default',
     password='12345'
 )
-
-checkpoint = "HuggingFaceTB/SmolLM-135M-Instruct"
-device = "cpu"
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
 
 pipe = pipeline("question-answering", model="deepset/roberta-base-squad2", tokenizer="deepset/roberta-base-squad2")
 
@@ -158,8 +155,10 @@ def load_files(batch_size: int) -> None:
 
 
 def get_weather_data(prompt: str, history: list[str]) -> str:
-    if not os.environ['GEMINI_API_KEY']:
-        print("Cannot generate weather api call without Gemini API key.")
+    try:
+        os.environ['GEMINI_API_KEY']
+    except KeyError:
+        return "The weather API is not available at the moment."
     url_meta_prompt = f"""
     {' '.join(history)}
     
