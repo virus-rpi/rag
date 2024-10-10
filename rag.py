@@ -1,13 +1,20 @@
 import glob
+import os
 import numpy as np
 import requests
+from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import pandas as pd
 import clickhouse_connect
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, pipeline
+import google.generativeai as genai
 
 print("Initializing models...")
+
+load_dotenv()
+if os.environ['GEMINI_API_KEY']:
+    genai.configure(api_key=os.environ['GEMINI_API_KEY'])
 
 client = clickhouse_connect.get_client(
     host='localhost',
@@ -20,7 +27,8 @@ checkpoint = "HuggingFaceTB/SmolLM-135M-Instruct"
 device = "cpu"
 tokenizer = AutoTokenizer.from_pretrained(checkpoint)
 model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
-history = []
+
+pipe = pipeline("question-answering", model="deepset/roberta-base-squad2", tokenizer="deepset/roberta-base-squad2")
 
 text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=500,
@@ -149,17 +157,19 @@ def load_files(batch_size: int) -> None:
     """)
 
 
-def get_weather_data(prompt: str) -> str:
+def get_weather_data(prompt: str, history: list[str]) -> str:
+    if not os.environ['GEMINI_API_KEY']:
+        print("Cannot generate weather api call without Gemini API key.")
     url_meta_prompt = f"""
+    {' '.join(history)}
+    
     Answer only with a valid request url for an api.open-meteo.com api endpoint. 
     The url should fetch all necessary data to answer the following prompt: "{prompt}"
     Use the parameter "&timezone=auto" to avoid time zone errors. The position should be given to the api as &longitude=... and &latitude=... .
-    ONLY CREATE A VALID Open-Meteo API URL! ANSWER ONLY WITH THE URL! 
-    ANSWER: \n
+    ONLY CREATE A VALID Open-Meteo API URL! ANSWER ONLY WITH THE URL!
     """
-    tokenized_url_meta_prompt = tokenizer.encode(url_meta_prompt, return_tensors='pt').to(device)
-    tokenized_answer = model.generate(tokenized_url_meta_prompt, return_tensors='pt').to(device)
-    answer =  tokenizer.decode(tokenized_answer[0]).strip().lower().replace("\n", "").replace("```", "")
+    temp_session = genai.GenerativeModel('gemini-1.5-flash').start_chat()
+    answer = temp_session.send_message(url_meta_prompt).text.strip().lower().replace("\n", "").replace("```", "")
     return str(requests.get(answer).json())
 
 def get_relevant_docs(query_embeddings):
@@ -172,7 +182,7 @@ def get_relevant_docs(query_embeddings):
     """)
     return [row['page_content'] for row in results.named_results()]
 
-def get_relevant_keywords(query_embeddings, threshold=1.6):
+def get_relevant_keywords(query_embeddings, threshold=1.8):
     results = client.query(f"""
         SELECT keywords,
         distance(embeddings, {query_embeddings}) as dist 
@@ -186,46 +196,52 @@ def get_relevant_keywords(query_embeddings, threshold=1.6):
     ]
     return relevant_keywords
 
-def get_relevant_api_data(user_query, query_embeddings) -> str:
+def get_relevant_api_data(user_query, query_embeddings, history) -> str:
     relevant_keywords = get_relevant_keywords(query_embeddings)
     data = ""
     if "weather" in relevant_keywords:
-        data += get_weather_data(user_query)
+        data += get_weather_data(user_query, history)
     return data
 
-def make_rag_prompt(query, relevant_passage, relevant_data):
+def make_context(relevant_passage, relevant_data):
     relevant_passage = ' '.join(relevant_passage)
     prompt = (
-        f"QUESTION: '{query}'\n"
         f"PASSAGE: '{relevant_passage}'\n"
         f"DATA: '{relevant_data}'\n"
-        'ANSWER: '
     )
     return prompt
 
-def generate_answer(query):
-    global history
-    if not query or query == "":
-        return "Please enter a query."
+def generate_prompt(query, history):
     query_embeddings = get_query_embedding(query)
     relevant_text = get_relevant_docs(query_embeddings)
-    relevant_api_data = get_relevant_api_data(query, query_embeddings)
+    relevant_api_data = get_relevant_api_data(query, query_embeddings, history)
     text = " ".join(relevant_text)
-    prompt = make_rag_prompt(query, relevant_passage=text, relevant_data=relevant_api_data)
-    history.append({"role": "user", "content": prompt})
-    input_text=tokenizer.apply_chat_template(history, tokenize=False)
-    inputs = tokenizer.encode(input_text, return_tensors='pt').to(device)
-    outputs = model.generate(inputs, max_new_tokens=100, temperature=0.5, top_p=0.9, do_sample=True)
-    return tokenizer.decode(outputs[0])
+    context = make_context(relevant_passage=text, relevant_data=relevant_api_data)
+    return query, context
+
+def main_loop():
+    initial_prompt = """
+        You are a helpful and informative chatbot that answers questions using information from the passage and/or data included below the question.
+        Respond in a complete sentence and make sure that your response is easy to understand for everyone.
+        Maintain a friendly and conversational tone. If the passage is really irrelevant, feel free to ignore it.
+        Do not talk about the provided passage or data and only use it to answer the question!\n\n
+        """
+    first_prompt = input("> ")
+    history = [initial_prompt+first_prompt]
+    prompt, context = generate_prompt(first_prompt, [])
+    yield {'question': prompt, "context": initial_prompt+context}
+    while True:
+        user_input = input("> ")
+        if not user_input or user_input == "":
+            print("Please enter a valid question.")
+            continue
+        if user_input == "exit":
+            break
+        prompt, context = generate_prompt(user_input, history)
+        yield {'question': prompt, "context": "\n".join(history) + context}
+        history.append(context+"\n"+prompt)
 
 if __name__ == "__main__":
     if input("Reindex information? (y/n): ") == "y": load_files(5)
-    initial_prompt = """
-    You are a helpful and informative chatbot that answers questions using information from the passage and/or data included below the question.
-    Respond in a complete sentence and make sure that your response is easy to understand for everyone.
-    Maintain a friendly and conversational tone. If the passage is really irrelevant, feel free to ignore it.
-    Do not talk about the provided passage or data and only use it to answer the question!\n\n
-    """
-    print(generate_answer(initial_prompt + input("> ")))
-    while True:
-        print(generate_answer(input("> ")))
+    for out in pipe(main_loop()):
+        print(out['answer'])
