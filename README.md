@@ -89,3 +89,4 @@ During the development I used [ChatGPT](https://chatgpt.com) to help me to debug
 - Use mean pooling on prompts that require the weather api to generate the embedding instead of using an embedded keyword
 - Better LLM / SLM model
 - Improve meta prompts
+- RAG optimized model and RAG transformer pipeline 
